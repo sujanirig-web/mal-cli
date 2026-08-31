@@ -21,7 +21,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import (
-    Float, FloatContainer, HSplit, Window,
+    Float, FloatContainer, HSplit, VSplit, Window,
     WindowAlign,
 )
 from prompt_toolkit.layout import ConditionalContainer
@@ -171,6 +171,16 @@ class MalCliShell:
             'toolbar.offline': '#120808 bg:#ff5c5c',
             'footer':          '#4a6b58 bg:#10251a',
             'bottom-toolbar':  'bg:#0b0f0a #8fa99a',
+            # Centered branding (retro CRT phosphor)
+            'brand':           '#66ff99 bg:#000000 bold',
+            'brand.dim':       '#335533 bg:#000000',
+            'brand.version':   '#66ff99 bg:#000000',
+            'esc':             '#9fe8c0 bg:#0b0f0a',
+            # Essential commands list (centered)
+            'esc.title':       '#4a6b58 bg:#0b0f0a',
+            'cmd.name':        '#00ff9f bg:#0b0f0a',
+            'cmd.desc':        '#9fe8c0 bg:#0b0f0a',
+            'cmd.sep':         '#3a5b46 bg:#0b0f0a',
         })
 
         # Buffer with history + autocomplete
@@ -190,18 +200,66 @@ class MalCliShell:
     # Layout construction
     # ------------------------------------------------------------
     def _build_layout(self):
-        header = Window(
-            FormattedTextControl(
-                HTML(
-                    f'<style fg="#00ff9f" bg="#0b0f0a"><b> ◆ mal-cli </b></style>'
-                    f'<style fg="#9fe8c0" bg="#0b0f0a"> Android Security Scanner </style>'
-                    f'<style fg="#4a6b58" bg="#0b0f0a">      v{__version__}</style>'
-                ),
-            ),
-            height=1,
-            align=WindowAlign.LEFT,
+        # --------------------------------------------------------
+        # Centered branding: "mal-cli" pushed slightly upward
+        # --------------------------------------------------------
+        def get_brand():
+            logo = (
+                " ███╗   ███╗ █████╗ ██╗      ██████╗ ██╗     ██╗\n"
+                " ████╗ ████║██╔══██╗██║     ██╔════╝ ██║     ██║\n"
+                " ██╔████╔██║███████║██║     ██║      ██║     ██║\n"
+                " ██║╚██╔╝██║██╔══██║██║     ██║      ██║     ██║\n"
+                " ██║ ╚═╝ ██║██║  ██║███████╗╚██████╗ ███████╗██║\n"
+                " ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚══════╝╚═╝"
+            )
+            return to_formatted_text([
+                ("class:brand", logo),
+                ("", "\n"),
+                ("class:brand.version", f"v{__version__}"),
+            ])
+
+        brand_window = Window(
+            FormattedTextControl(get_brand, show_cursor=False),
+            align=WindowAlign.CENTER,
+            dont_extend_height=True,
+            height=7,
         )
 
+        # --------------------------------------------------------
+        # Essential commands in a row (centered)
+        # --------------------------------------------------------
+        def get_essential():
+            fragments = [("class:esc.title", "   Essential Commands   ")]
+            for name, desc in _essentials:
+                fragments.append(("", "\n"))
+                fragments.append(("class:cmd.name", f"    {name:<12}"))
+                fragments.append(("class:cmd.desc", f"{desc}"))
+            return to_formatted_text(fragments)
+
+        _essentials = [
+            ("devices", "list connected ADB devices"),
+            ("apps", "list packages w/ risk"),
+            ("scan", "run a security scan"),
+            ("monitor", "live monitoring"),
+            ("info", "package details"),
+            ("events", "security events"),
+            ("history", "risk history"),
+            ("report", "generate report"),
+            ("disable", "disable package"),
+            ("uninstall", "uninstall package"),
+            ("quarantine", "backup + disable"),
+            ("settings", "open settings"),
+        ]
+
+        essential_window = Window(
+            FormattedTextControl(get_essential, show_cursor=False),
+            align=WindowAlign.CENTER,
+            height=Dimension.exact(len(_essentials) + 1),
+        )
+
+        # --------------------------------------------------------
+        # Output pane (fills remaining middle space)
+        # --------------------------------------------------------
         output_window = Window(
             self.output_frag,
             wrap_lines=True,
@@ -241,6 +299,7 @@ class MalCliShell:
             height=1,
             wrap_lines=False,
             always_hide_cursor=False,
+            width=Dimension(max=78),
         )
         prompt_marker = Window(
             FormattedTextControl(to_formatted_text([('class:prompt', '❯ ')])),
@@ -261,21 +320,42 @@ class MalCliShell:
         )
         self._palette_window = palette_window
 
-        input_row = FloatContainer(
-            content=input_window,
-            floats=[Float(left=0, top=0, transparent=True, content=prompt_marker)],
-        )
+        # Reserve the prompt marker its own columns so it does not
+        # overlay (and hide) the first characters typed in the input buffer.
+        input_row = VSplit([
+            prompt_marker,
+            input_window,
+        ])
 
         toolbar_window = Window(
             FormattedTextControl(get_toolbar, style='class:toolbar'),
             height=1,
         )
 
-        container = HSplit([
-            header,
-            output_pane,
-            toolbar_window,
+        # --------------------------------------------------------
+        # Centered command input, pushed a little below centre
+        # --------------------------------------------------------
+        centered_input = HSplit([
+            Window(char=" ", width=Dimension(weight=1)),
             input_row,
+            Window(char=" ", width=Dimension(weight=1)),
+        ])
+
+        # Center the Essential Commands block vertically by flanking it
+        # with equal-weight blank space inside the output region.
+        centered_commands = HSplit([
+            Window(char=" ", height=Dimension(weight=1)),
+            essential_window,
+            Window(char=" ", height=Dimension(weight=1)),
+        ])
+
+        container = HSplit([
+            brand_window,
+            output_pane,
+            centered_commands,
+            centered_input,
+            Window(char=" ", height=1),
+            toolbar_window,
         ])
 
         # Top-level float container so the command palette can overlay the
@@ -391,13 +471,6 @@ class MalCliShell:
 
     def _banner(self):
         self.output = []
-        self._append('output.head', '  mal-cli -- Android Security Scanner')
-        self._append('output', '  ' + '─' * 46)
-        self._append('output.dim', '  • Interactive security analysis over ADB')
-        self._append('output.dim', '  • Risk scoring  |  live monitoring  |  remediation')
-        self._append('output', '')
-        self._append('output', '  Type "help" for commands or "settings" to adjust options.')
-        self._append('output.dim', '  Press Ctrl+C / Ctrl+D or type "exit" to quit.')
         self._append('output', '')
 
     def _print(self, text: str = ""):
