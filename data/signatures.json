@@ -1,0 +1,9 @@
+{
+  "hashes": {
+    "d41d8cd98f00b204e9800998ecf8427e": "Example malware hash",
+    "deadbeefcafebabe": "Fake malware"
+  },
+  "signers": [
+    "CN=Malicious, OU=Hacker"
+  ]
+}

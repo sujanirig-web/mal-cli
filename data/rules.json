@@ -1,0 +1,12 @@
+{
+  "permission_weights": {
+    "android.permission.READ_SMS": 15,
+    "android.permission.RECORD_AUDIO": 12,
+    "android.permission.CAMERA": 10,
+    "android.permission.ACCESS_FINE_LOCATION": 10
+  },
+  "service_weights": {
+    "exported": 10,
+    "background": 8
+  }
+}

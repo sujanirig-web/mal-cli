@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mal-cli"
+version = "0.1.0"
+description = "Android security scanner and live monitor via ADB"
+readme = "README.md"
+authors = [
+    {name = "PhoneGuard Team", email = "team@phoneguard.io"},
+]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "colorama>=0.4.6",
+    "prompt_toolkit>=3.0",
+    "windows-curses>=2.3.0; platform_system=='Windows'",
+]
+
+[project.scripts]
+mal-cli = "mal_cli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
