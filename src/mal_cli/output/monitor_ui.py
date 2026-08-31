@@ -34,43 +34,64 @@ class MonitorUI:
     def _curses_loop(self, stdscr):
         curses.curs_set(0)
         stdscr.nodelay(1)
+        # Professional dark scheme with green accents
+        if curses.has_colors():
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_GREEN, -1)       # header / prompt
+            curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_GREEN)  # online badge
+            curses.init_pair(3, curses.COLOR_YELLOW, -1)      # high risk
+            curses.init_pair(4, curses.COLOR_RED, -1)         # critical risk
+            curses.init_pair(5, curses.COLOR_MAGENTA, -1)     # medium risk
+            curses.init_pair(6, curses.COLOR_CYAN, -1)        # info / labels
+            curses.init_pair(7, curses.COLOR_WHITE, -1)       # normal
         self.running = True
         while self.running:
             stdscr.clear()
             height, width = stdscr.getmaxyx()
-            # Header
-            stdscr.addstr(0, 0, "mal-cli Monitor", curses.A_BOLD)
-            stdscr.addstr(1, 0, "Press 'q' to quit")
-            # Package list
-            y = 3
-            stdscr.addstr(y, 0, "PACKAGE".ljust(25) + "STATUS".ljust(15) + "RISK")
-            y += 1
+            # Header bar
+            title = "  ◆ mal-cli MONITOR  "
+            stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(0, 0, title.ljust(width))
+            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(1, 0, "  [q] quit   |   Ctrl+C to return", curses.color_pair(6))
+            # Divider
+            stdscr.addstr(2, 0, "─" * width, curses.color_pair(6))
+            # Package table header
+            y = 4
+            label = "PACKAGE".ljust(25) + "STATUS".ljust(15) + "RISK"
+            stdscr.addstr(y, 0, label, curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(y + 1, 0, "─" * width, curses.color_pair(6))
+            y += 2
             with self.lock:
-                for pkg in self.packages[-height+5:]:
+                for pkg in self.packages[-height+10:]:
                     name = pkg.get("name", "")[:24]
                     status = pkg.get("status", "UNKNOWN")[:14]
                     risk = pkg.get("risk", "")
-                    color = curses.COLOR_WHITE
                     if "CRITICAL" in risk:
-                        color = curses.COLOR_RED
+                        c = curses.color_pair(4) | curses.A_BOLD
                     elif "HIGH" in risk:
-                        color = curses.COLOR_YELLOW
+                        c = curses.color_pair(3)
                     elif "MEDIUM" in risk:
-                        color = curses.COLOR_MAGENTA
+                        c = curses.color_pair(5)
                     elif "SAFE" in risk:
-                        color = curses.COLOR_GREEN
+                        c = curses.color_pair(1)
+                    else:
+                        c = curses.color_pair(7)
                     if y < height - 2:
-                        stdscr.addstr(y, 0, name.ljust(25), curses.color_pair(color))
-                        stdscr.addstr(y, 25, status.ljust(15))
-                        stdscr.addstr(y, 40, risk)
+                        stdscr.addstr(y, 0, name.ljust(25), curses.color_pair(7))
+                        stdscr.addstr(y, 25, status.ljust(15), curses.color_pair(7))
+                        stdscr.addstr(y, 40, risk, c)
                         y += 1
-                # Events
+                # Events section
                 y += 1
-                stdscr.addstr(y, 0, "EVENTS:", curses.A_BOLD)
+                if y < height:
+                    stdscr.addstr(y, 0, "EVENTS", curses.color_pair(1) | curses.A_BOLD)
                 y += 1
-                for evt in self.events[-10:]:
+                for evt in self.events[-8:]:
                     if y < height - 1:
-                        stdscr.addstr(y, 0, f"{evt.get('timestamp', '')} {evt.get('package', '')}: {evt.get('description', '')[:50]}")
+                        line = f"{evt.get('timestamp', '')} {evt.get('package', '')}: {evt.get('description', '')[:50]}"
+                        stdscr.addstr(y, 0, line[:width], curses.color_pair(7))
                         y += 1
             stdscr.refresh()
             time.sleep(0.5)

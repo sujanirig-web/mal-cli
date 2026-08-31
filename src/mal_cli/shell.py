@@ -24,6 +24,8 @@ from prompt_toolkit.layout.containers import (
     Float, FloatContainer, HSplit, Window,
     WindowAlign,
 )
+from prompt_toolkit.layout import ConditionalContainer
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.layout.controls import FormattedTextControl, BufferControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.styles import Style
@@ -104,7 +106,30 @@ class MalCliShell:
             "events", "history", "disable", "uninstall",
             "quarantine", "report", "settings", "help", "clear", "exit", "quit"
         ]
+        self.command_help = {
+            "devices":     "list connected ADB devices",
+            "apps":        "list packages with risk levels",
+            "info":        "show info for a package",
+            "scan":        "run a one-time security scan",
+            "monitor":     "start live monitoring dashboard",
+            "events":      "show recent security events",
+            "history":     "show risk history for a package",
+            "disable":     "disable a package",
+            "uninstall":   "uninstall a package",
+            "quarantine":  "backup APK and disable",
+            "report":      "generate a report (json|yaml|text)",
+            "settings":    "open settings menu",
+            "help":        "show command help",
+            "clear":       "clear the output pane",
+            "exit":        "quit the shell",
+            "quit":        "quit the shell",
+        }
         self.package_names = []
+
+        # Slash-command palette state
+        self.palette_open = False
+        self.palette_index = 0
+        self.filtered_palette = []
 
         # Output pane lines (rendered as formatted text)
         self.output = []   # list of styled (style, text) tuples
@@ -118,19 +143,34 @@ class MalCliShell:
         self.completer = MalCliCompleter(self.commands, self.package_names)
 
         self._style = Style.from_dict({
-            'app-header':      '#00ff00 bold',
-            'prompt':          '#00ff00 bold',
-            'user':            '#00aaff bold',
-            'output':          '#cccccc',
-            'output.info':     '#00aaff',
-            'output.ok':       '#00ff00',
-            'output.warn':     '#ffaa00',
-            'output.err':      '#ff5555',
-            'output.head':     '#00ffff bold',
-            'toolbar':         '#000000 bg:#888888',
-            'toolbar.online':  '#000000 bg:#00ff00',
-            'toolbar.offline':'#000000 bg:#ff5555',
-            'bottom-toolbar':  'bg:#222222 #aaaaaa',
+            # Background surfaces
+            'app-header':      '#00ff9f bold bg:#0b0f0a',
+            'header-text':     '#9fe8c0 bg:#0b0f0a',
+            'header-dim':      '#4a6b58 bg:#0b0f0a',
+            'prompt':          '#00ff9f bold',
+            'input':           '#f2ffe9',
+            # Output colors
+            'user':            '#32ffa7 bold',
+            'output':          '#d7e8d7',
+            'output.info':     '#4fc3ff',
+            'output.ok':       '#2be37c',
+            'output.warn':     '#ffc24b',
+            'output.err':      '#ff5c5c',
+            'output.head':     '#4dffc0 bold',
+            'output.dim':      '#6b7f70',
+            # Palette (green theme)
+            'palette':         'bg:#10251a',
+            'palette.border':  'bg:#10251a #3a5b46',
+            'palette.name':    '#00ff9f bg:#10251a',
+            'palette.desc':    '#9fe8c0 bg:#10251a',
+            'palette.active':  'bg:#2be37c #06120a bold',
+            # Toolbar
+            'toolbar':         '#0b0f0a bg:#10251a',
+            'toolbar.sep':     '#3a5b46 bg:#10251a',
+            'toolbar.online':  '#06120a bg:#2be37c',
+            'toolbar.offline': '#120808 bg:#ff5c5c',
+            'footer':          '#4a6b58 bg:#10251a',
+            'bottom-toolbar':  'bg:#0b0f0a #8fa99a',
         })
 
         # Buffer with history + autocomplete
@@ -152,8 +192,11 @@ class MalCliShell:
     def _build_layout(self):
         header = Window(
             FormattedTextControl(
-                HTML(f'<style fg="#00ff00" bg="#000000"><b> mal-cli </b></style>'
-                     f'<style fg="#666666"> v{__version__} — Android security scanner</style>'),
+                HTML(
+                    f'<style fg="#00ff9f" bg="#0b0f0a"><b> ◆ mal-cli </b></style>'
+                    f'<style fg="#9fe8c0" bg="#0b0f0a"> Android Security Scanner </style>'
+                    f'<style fg="#4a6b58" bg="#0b0f0a">      v{__version__}</style>'
+                ),
             ),
             height=1,
             align=WindowAlign.LEFT,
@@ -180,12 +223,16 @@ class MalCliShell:
                 dev_style = 'class:toolbar.offline'
                 label = '○ OFFLINE'
             return to_formatted_text([
-                (f'class:toolbar', ' ▍'),
+                (f'class:toolbar', ' '),
                 (f'{dev_style}', f' {label} '),
-                ('class:toolbar', f' {dev_info} '),
-                ('class:toolbar', f'│ packages: {pkg_count} '),
-                ('class:toolbar', f'│ db: {self.db.db_path} '),
-                ('class:toolbar', f'│ {len(self.output)} lines'),
+                ('class:toolbar.sep', ' │ '),
+                ('class:toolbar', f'{dev_info} '),
+                ('class:toolbar.sep', '│ '),
+                ('class:toolbar', f'packages: {pkg_count} '),
+                ('class:toolbar.sep', '│ '),
+                ('class:toolbar', f'db: {self.db.db_path} '),
+                ('class:toolbar.sep', '│ '),
+                ('class:toolbar', f'{len(self.output)} lines'),
             ])
 
         # Input field with a floating "❯" prompt marker
@@ -201,6 +248,19 @@ class MalCliShell:
             align=WindowAlign.RIGHT,
             dont_extend_width=True,
         )
+
+        # Slash-command palette (Claude Code style right-hand command list)
+        palette_control = FormattedTextControl(self._get_palette_text, show_cursor=False)
+        palette_window = Window(
+            palette_control,
+            height=Dimension.exact(7),
+            always_hide_cursor=True,
+            wrap_lines=False,
+            dont_extend_height=True,
+            dont_extend_width=True,
+        )
+        self._palette_window = palette_window
+
         input_row = FloatContainer(
             content=input_window,
             floats=[Float(left=0, top=0, transparent=True, content=prompt_marker)],
@@ -218,24 +278,73 @@ class MalCliShell:
             input_row,
         ])
 
+        # Top-level float container so the command palette can overlay the
+        # output pane just above the input bar (Claude Code style).
+        root = FloatContainer(
+            container,
+            floats=[
+                Float(right=0, bottom=1, height=7, width=46, left=None,
+                      content=ConditionalContainer(
+                          palette_window,
+                          filter=Condition(self._palette_is_open),
+                      )),
+            ],
+        )
+
         # Key bindings
         kb = KeyBindings()
 
         @kb.add('enter')
         def _(event):
-            self._dispatch(self.buffer.text)
-            self.buffer.reset()
+            if self.palette_open and self.filtered_palette:
+                cmd = self.filtered_palette[
+                    self.palette_index % len(self.filtered_palette)
+                ][0]
+                self.buffer.text = cmd
+                self.buffer.cursor_position = len(cmd)
+                self._close_palette()
+                self._run_buffer()
+            else:
+                self._run_buffer()
+
+        @kb.add('up')
+        def _(event):
+            if self.palette_open:
+                self.palette_index -= 1
+                self._refresh_palette()
+            else:
+                event.app.current_buffer.cursor_up()
+
+        @kb.add('down')
+        def _(event):
+            if self.palette_open:
+                self.palette_index += 1
+                self._refresh_palette()
+            else:
+                event.app.current_buffer.cursor_down()
+
+        @kb.add('escape')
+        def _(event):
+            if self.palette_open:
+                self._close_palette()
+            else:
+                event.app.current_buffer.reset()
 
         @kb.add('c-c')
         def _(event):
-            event.app.exit()
+            if self.palette_open:
+                self._close_palette()
+            else:
+                event.app.exit()
 
         @kb.add('c-d')
         def _(event):
             event.app.exit()
 
+        self.buffer.on_text_changed += self._on_text_changed
+
         self.app = Application(
-            layout=Layout(container, focused_element=input_window),
+            layout=Layout(root, focused_element=input_window),
             key_bindings=kb,
             style=self._style,
             full_screen=True,
@@ -282,11 +391,13 @@ class MalCliShell:
 
     def _banner(self):
         self.output = []
-        self._append('output.head', 'mal-cli ' + __version__)
-        self._append('output', 'Android security scanner & live monitor (via ADB)')
+        self._append('output.head', '  mal-cli -- Android Security Scanner')
+        self._append('output', '  ' + '─' * 46)
+        self._append('output.dim', '  • Interactive security analysis over ADB')
+        self._append('output.dim', '  • Risk scoring  |  live monitoring  |  remediation')
         self._append('output', '')
-        self._append('output', '  Type "help" for commands, "settings" to adjust options.')
-        self._append('output', '  Press Ctrl+C / Ctrl+D or type "exit" to quit.')
+        self._append('output', '  Type "help" for commands or "settings" to adjust options.')
+        self._append('output.dim', '  Press Ctrl+C / Ctrl+D or type "exit" to quit.')
         self._append('output', '')
 
     def _print(self, text: str = ""):
@@ -306,6 +417,71 @@ class MalCliShell:
 
     def _head(self, text: str):
         self._append('output.head', '▍' + text)
+
+    # ------------------------------------------------------------
+    # Slash-command palette
+    # ------------------------------------------------------------
+    def _run_buffer(self):
+        self._dispatch(self.buffer.text)
+        self.buffer.reset()
+        self._close_palette()
+
+    def _on_text_changed(self, event=None):
+        text = self.buffer.text.lstrip()
+        if text.startswith('/') and len(text) > 1:
+            self._open_palette()
+        else:
+            if self.palette_open and not text.startswith('/'):
+                self._close_palette()
+
+    def _open_palette(self):
+        if self.palette_open:
+            return
+        self.palette_open = True
+        self.palette_index = 0
+        self._refresh_palette()
+
+    def _palette_is_open(self):
+        return self.palette_open
+
+    def _close_palette(self):
+        self.palette_open = False
+        self._refresh_palette()
+
+    def _refresh_palette(self):
+        # Recompute the filtered command list from the buffer text after '/'
+        text = self.buffer.text.lstrip()
+        query = text[1:] if text.startswith('/') else ''
+        if query:
+            self.filtered_palette = [
+                (c, self.command_help.get(c, ''))
+                for c in self.commands if c.startswith(query)
+            ]
+        else:
+            self.filtered_palette = [
+                (c, self.command_help.get(c, '')) for c in self.commands
+            ]
+        self.palette_index = max(0, min(self.palette_index,
+                                        max(0, len(self.filtered_palette) - 1)))
+
+    def _get_palette_text(self):
+        if not self.palette_open:
+            return to_formatted_text([])
+        if not self.filtered_palette:
+            return to_formatted_text([('class:palette', '   no matching commands')])
+        lines = [('class:palette.border', '   Commands')]
+        for i, (name, desc) in enumerate(self.filtered_palette):
+            active = (i == self.palette_index % len(self.filtered_palette))
+            sty = 'class:palette.active' if active else 'class:palette'
+            name_sty = 'class:palette.active' if active else 'class:palette.name'
+            desc_sty = 'class:palette.active' if active else 'class:palette.desc'
+            lines.append((sty, '  '))
+            lines.append((name_sty, name.ljust(12)))
+            lines.append((desc_sty, desc[:26]))
+            lines.append(('', '\n'))
+        if lines and lines[-1][1].endswith('\n'):
+            lines.pop()
+        return to_formatted_text(lines)
 
     # ------------------------------------------------------------
     # Dispatch
@@ -406,9 +582,10 @@ class MalCliShell:
             for i, cell in enumerate(row):
                 if i < len(col_widths):
                     col_widths[i] = max(col_widths[i], len(str(cell)))
-        header_line = "  ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
-        self._head(' ' + header_line)
-        self._append('output', "  " + "  ".join("-" * w for w in col_widths))
+        self._append('output', "  ┌─" + "─┬─".join("─" * w for w in col_widths) + "─┐")
+        header_line = "  │ " + " │ ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers)) + " │"
+        self._head(header_line)
+        self._append('output', "  ├─" + "─┼─".join("─" * w for w in col_widths) + "─┤")
         for row in rows:
             cells = []
             for i, cell in enumerate(row):
@@ -424,8 +601,11 @@ class MalCliShell:
                     else:
                         style = 'output.ok'
                 cells.append((style, text.ljust(col_widths[i])))
+            self.output.append(('output', "  │ "))
             self.output.extend(cells)
+            self.output.append(('output', " │"))
             self._refresh_output()
+        self._append('output', "  └─" + "─┴─".join("─" * w for w in col_widths) + "─┘")
 
     def do_devices(self):
         dev_mgr = DeviceManager(self.client)
@@ -610,24 +790,30 @@ class MalCliShell:
             self._print(gen.text_report())
 
     def _show_help(self):
-        self._head(" mal-cli Commands")
-        self._print("  devices            list connected ADB devices")
-        self._print("  apps               list installed packages with risk levels")
-        self._print("  info <package>     show static/dynamic info for a package")
-        self._print("  scan [package]     run a one-time security scan")
-        self._print("  monitor            start live monitoring dashboard (Ctrl+C to stop)")
-        self._print("  events [limit]     show recent security events")
-        self._print("  history <package>  show risk history for a package")
-        self._print("  disable <package>  disable a package")
-        self._print("  uninstall <pkg>    uninstall a package")
-        self._print("  quarantine <pkg>   backup APK and disable (quarantine)")
-        self._print("  report [fmt]       generate a report (json|yaml|text)")
-        self._print("  settings           open settings menu")
-        self._print("  clear              clear the output pane")
-        self._print("  help               show this help")
-        self._print("  exit / quit        quit the shell")
-        self._print("")
-        self._info("Tip: press Tab to autocomplete packages and commands.")
+        self._head("  mal-cli Commands")
+        self._append('output', '')
+        self._info("  ▸ Inspect")
+        self._print("    devices            list connected ADB devices")
+        self._print("    apps               list installed packages with risk levels")
+        self._print("    info <package>     show static/dynamic info for a package")
+        self._print("    scan [package]     run a one-time security scan")
+        self._print("    monitor            start live monitoring dashboard (Ctrl+C to stop)")
+        self._print("    events [limit]     show recent security events")
+        self._print("    history <package>  show risk history for a package")
+        self._print("    report [fmt]       generate a report (json|yaml|text)")
+        self._append('output', '')
+        self._info("  ▸ Remediate")
+        self._print("    disable <package>  disable a package")
+        self._print("    uninstall <pkg>    uninstall a package")
+        self._print("    quarantine <pkg>   backup APK and disable (quarantine)")
+        self._append('output', '')
+        self._info("  ▸ System")
+        self._print("    settings           open settings menu")
+        self._print("    clear              clear the output pane")
+        self._print("    help               show this help")
+        self._print("    exit / quit        quit the shell")
+        self._append('output', '')
+        self._ok("Tip: press Tab to autocomplete packages and commands.")
 
     def _settings_menu(self):
         self._head(" Settings")
