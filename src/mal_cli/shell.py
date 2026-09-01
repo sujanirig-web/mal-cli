@@ -12,6 +12,18 @@ import json
 from pathlib import Path
 from typing import List, Optional
 
+# The TUI renders unicode (e.g. the '❯' prompt) which is not encodable in the
+# legacy Windows console codepage (cp1252). Force UTF-8 so output never throws
+# UnicodeEncodeError mid-command.
+for _stream in (sys.stdout, sys.stderr, sys.stdin):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, TypeError, ValueError):
+        try:
+            _stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
 from prompt_toolkit import Application
 from prompt_toolkit.application import get_app
 from prompt_toolkit.buffer import Buffer
@@ -21,7 +33,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import (
-    Float, FloatContainer, HSplit, VSplit, Window,
+    HSplit, VSplit, Window,
     WindowAlign,
 )
 from prompt_toolkit.layout import ConditionalContainer
@@ -47,6 +59,7 @@ from mal_cli.remediation.quarantine import QuarantineManager
 # ------------------------------------------------------------
 CONFIG_DIR = Path.home() / ".mal_cli"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+UI_CONFIG_FILE = Path(__file__).resolve().parent.parent.parent / "ui_config.json"
 
 
 def load_config():
@@ -60,6 +73,78 @@ def save_config(config):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+
+
+# ------------------------------------------------------------
+# UI config (editable JSON, no rebuild needed)
+# ------------------------------------------------------------
+DEFAULT_UI = {
+    "show_brand": True,
+    "input_position_percent": 50.0,
+    "colors": {
+        "app-header":      "#00ff9f bold bg:#0b0f0a",
+        "header-text":     "#9fe8c0 bg:#0b0f0a",
+        "header-dim":      "#4a6b58 bg:#0b0f0a",
+        "prompt":          "#00ff9f bold",
+        "input":           "#f2ffe9",
+        "inputbar":        "bg:#2d2d2d #e6e6e6",
+        "user":            "#32ffa7 bold",
+        "output":          "#d7e8d7",
+        "output.info":     "#4fc3ff",
+        "output.ok":       "#2be37c",
+        "output.warn":     "#ffc24b",
+        "output.err":      "#ff5c5c",
+        "output.head":     "#4dffc0 bold",
+        "output.dim":      "#6b7f70",
+        "palette":         "bg:#10251a",
+        "palette.border":  "bg:#10251a #3a5b46",
+        "palette.name":    "#00ff9f bg:#10251a",
+        "palette.desc":    "#9fe8c0 bg:#10251a",
+        "palette.active":  "bg:#2be37c #06120a bold",
+        "toolbar":         "#0b0f0a bg:#10251a",
+        "toolbar.sep":     "#3a5b46 bg:#10251a",
+        "toolbar.online":  "#06120a bg:#2be37c",
+        "toolbar.offline": "#120808 bg:#ff5c5c",
+        "footer":          "#4a6b58 bg:#10251a",
+        "bottom-toolbar":  "bg:#0b0f0a #8fa99a",
+        "brand":           "#66ff99 bg:#000000 bold",
+        "brand.dim":       "#335533 bg:#000000",
+        "brand.version":   "#66ff99 bg:#000000",
+        "esc":             "#9fe8c0 bg:#0b0f0a",
+    },
+}
+
+
+def load_ui_config():
+    if UI_CONFIG_FILE.exists():
+        try:
+            with open(UI_CONFIG_FILE) as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+    else:
+        cfg = {}
+    result = {
+        "show_brand": bool(cfg.get("show_brand", DEFAULT_UI["show_brand"])),
+        "input_position_percent": float(
+            cfg.get("input_position_percent", DEFAULT_UI["input_position_percent"])
+        ),
+        "colors": dict(DEFAULT_UI["colors"]),
+    }
+    if isinstance(cfg.get("colors"), dict):
+        for k, v in cfg["colors"].items():
+            if k in result["colors"] and isinstance(v, str):
+                result["colors"][k] = v
+    return result
+
+
+def write_default_ui_config():
+    if not UI_CONFIG_FILE.exists():
+        try:
+            with open(UI_CONFIG_FILE, "w") as f:
+                json.dump(DEFAULT_UI, f, indent=2)
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------
@@ -100,6 +185,8 @@ class MalCliShell:
         self.analyzer = analyzer
         self.scanner = None           # created once we have a device
         self.config = load_config()
+        write_default_ui_config()
+        self.ui = load_ui_config()
 
         self.commands = [
             "devices", "apps", "info", "scan", "monitor",
@@ -142,46 +229,7 @@ class MalCliShell:
 
         self.completer = MalCliCompleter(self.commands, self.package_names)
 
-        self._style = Style.from_dict({
-            # Background surfaces
-            'app-header':      '#00ff9f bold bg:#0b0f0a',
-            'header-text':     '#9fe8c0 bg:#0b0f0a',
-            'header-dim':      '#4a6b58 bg:#0b0f0a',
-            'prompt':          '#00ff9f bold',
-            'input':           '#f2ffe9',
-            # Output colors
-            'user':            '#32ffa7 bold',
-            'output':          '#d7e8d7',
-            'output.info':     '#4fc3ff',
-            'output.ok':       '#2be37c',
-            'output.warn':     '#ffc24b',
-            'output.err':      '#ff5c5c',
-            'output.head':     '#4dffc0 bold',
-            'output.dim':      '#6b7f70',
-            # Palette (green theme)
-            'palette':         'bg:#10251a',
-            'palette.border':  'bg:#10251a #3a5b46',
-            'palette.name':    '#00ff9f bg:#10251a',
-            'palette.desc':    '#9fe8c0 bg:#10251a',
-            'palette.active':  'bg:#2be37c #06120a bold',
-            # Toolbar
-            'toolbar':         '#0b0f0a bg:#10251a',
-            'toolbar.sep':     '#3a5b46 bg:#10251a',
-            'toolbar.online':  '#06120a bg:#2be37c',
-            'toolbar.offline': '#120808 bg:#ff5c5c',
-            'footer':          '#4a6b58 bg:#10251a',
-            'bottom-toolbar':  'bg:#0b0f0a #8fa99a',
-            # Centered branding (retro CRT phosphor)
-            'brand':           '#66ff99 bg:#000000 bold',
-            'brand.dim':       '#335533 bg:#000000',
-            'brand.version':   '#66ff99 bg:#000000',
-            'esc':             '#9fe8c0 bg:#0b0f0a',
-            # Essential commands list (centered)
-            'esc.title':       '#4a6b58 bg:#0b0f0a',
-            'cmd.name':        '#00ff9f bg:#0b0f0a',
-            'cmd.desc':        '#9fe8c0 bg:#0b0f0a',
-            'cmd.sep':         '#3a5b46 bg:#0b0f0a',
-        })
+        self._style = Style.from_dict(self.ui["colors"])
 
         # Buffer with history + autocomplete
         self.buffer = Buffer(
@@ -226,38 +274,6 @@ class MalCliShell:
         )
 
         # --------------------------------------------------------
-        # Essential commands in a row (centered)
-        # --------------------------------------------------------
-        def get_essential():
-            fragments = [("class:esc.title", "   Essential Commands   ")]
-            for name, desc in _essentials:
-                fragments.append(("", "\n"))
-                fragments.append(("class:cmd.name", f"    {name:<12}"))
-                fragments.append(("class:cmd.desc", f"{desc}"))
-            return to_formatted_text(fragments)
-
-        _essentials = [
-            ("devices", "list connected ADB devices"),
-            ("apps", "list packages w/ risk"),
-            ("scan", "run a security scan"),
-            ("monitor", "live monitoring"),
-            ("info", "package details"),
-            ("events", "security events"),
-            ("history", "risk history"),
-            ("report", "generate report"),
-            ("disable", "disable package"),
-            ("uninstall", "uninstall package"),
-            ("quarantine", "backup + disable"),
-            ("settings", "open settings"),
-        ]
-
-        essential_window = Window(
-            FormattedTextControl(get_essential, show_cursor=False),
-            align=WindowAlign.CENTER,
-            height=Dimension.exact(len(_essentials) + 1),
-        )
-
-        # --------------------------------------------------------
         # Output pane (fills remaining middle space)
         # --------------------------------------------------------
         output_window = Window(
@@ -266,7 +282,6 @@ class MalCliShell:
             always_hide_cursor=True,
             height=Dimension(weight=1),
         )
-        output_pane = output_window
 
         # Bottom toolbar (refresh state each render)
         def get_toolbar():
@@ -293,26 +308,28 @@ class MalCliShell:
                 ('class:toolbar', f'{len(self.output)} lines'),
             ])
 
-        # Input field with a floating "❯" prompt marker
+        # Input field with a "❯" prompt marker on a visible bar
         input_window = Window(
             self.buffer_control,
             height=1,
             wrap_lines=False,
             always_hide_cursor=False,
             width=Dimension(max=78),
+            style='class:inputbar',
         )
         prompt_marker = Window(
-            FormattedTextControl(to_formatted_text([('class:prompt', '❯ ')])),
+            FormattedTextControl(to_formatted_text([('class:prompt', '> ')])),
             width=2,
             align=WindowAlign.RIGHT,
             dont_extend_width=True,
+            style='class:inputbar',
         )
 
-        # Slash-command palette (Claude Code style right-hand command list)
+        # Slash-command palette pops up directly above the input bar.
         palette_control = FormattedTextControl(self._get_palette_text, show_cursor=False)
         palette_window = Window(
             palette_control,
-            height=Dimension.exact(7),
+            height=Dimension.exact(len(self.commands) + 1),
             always_hide_cursor=True,
             wrap_lines=False,
             dont_extend_height=True,
@@ -341,35 +358,38 @@ class MalCliShell:
             Window(char=" ", width=Dimension(weight=1)),
         ])
 
-        # Center the Essential Commands block vertically by flanking it
-        # with equal-weight blank space inside the output region.
-        centered_commands = HSplit([
-            Window(char=" ", height=Dimension(weight=1)),
-            essential_window,
-            Window(char=" ", height=Dimension(weight=1)),
-        ])
+        # output pane fills the whole middle region (hidden when empty)
+        output_pane = ConditionalContainer(
+            output_window,
+            filter=Condition(lambda: bool(self.output)),
+        )
 
-        container = HSplit([
+        # Slash-command palette pops up directly above the input bar.
+        palette_popup = ConditionalContainer(
+            palette_window,
+            filter=Condition(self._palette_is_open),
+        )
+
+        # Brand can be hidden/kept via ui_config.json
+        brand_container = ConditionalContainer(
             brand_window,
+            filter=Condition(lambda: self.ui["show_brand"]),
+        )
+
+        # Claude Code-style layout: compact brand at top, output fills the
+        # middle, and the slash palette + input bar pinned to the bottom above
+        # a thin toolbar.
+        container = HSplit([
+            brand_container,
             output_pane,
-            centered_commands,
+            Window(char=" ", height=Dimension(weight=1)),
+            palette_popup,
             centered_input,
             Window(char=" ", height=1),
             toolbar_window,
         ])
 
-        # Top-level float container so the command palette can overlay the
-        # output pane just above the input bar (Claude Code style).
-        root = FloatContainer(
-            container,
-            floats=[
-                Float(right=0, bottom=1, height=7, width=46, left=None,
-                      content=ConditionalContainer(
-                          palette_window,
-                          filter=Condition(self._palette_is_open),
-                      )),
-            ],
-        )
+        root = container
 
         # Key bindings
         kb = KeyBindings()
@@ -380,8 +400,8 @@ class MalCliShell:
                 cmd = self.filtered_palette[
                     self.palette_index % len(self.filtered_palette)
                 ][0]
-                self.buffer.text = cmd
-                self.buffer.cursor_position = len(cmd)
+                self.buffer.text = "/" + cmd
+                self.buffer.cursor_position = len(self.buffer.text)
                 self._close_palette()
                 self._run_buffer()
             else:
@@ -495,14 +515,21 @@ class MalCliShell:
     # Slash-command palette
     # ------------------------------------------------------------
     def _run_buffer(self):
+        text = self.buffer.text.lstrip()
+        if not text.startswith('/'):
+            self._err("Commands must begin with '/'. Type /help for available commands.")
+            self.buffer.reset()
+            self._close_palette()
+            return
         self._dispatch(self.buffer.text)
         self.buffer.reset()
         self._close_palette()
 
     def _on_text_changed(self, event=None):
         text = self.buffer.text.lstrip()
-        if text.startswith('/') and len(text) > 1:
+        if text.startswith('/') and len(text) >= 1:
             self._open_palette()
+            self._refresh_palette()
         else:
             if self.palette_open and not text.startswith('/'):
                 self._close_palette()
@@ -542,15 +569,21 @@ class MalCliShell:
             return to_formatted_text([])
         if not self.filtered_palette:
             return to_formatted_text([('class:palette', '   no matching commands')])
-        lines = [('class:palette.border', '   Commands')]
+        lines = []
+        n = len(self.filtered_palette)
         for i, (name, desc) in enumerate(self.filtered_palette):
-            active = (i == self.palette_index % len(self.filtered_palette))
-            sty = 'class:palette.active' if active else 'class:palette'
-            name_sty = 'class:palette.active' if active else 'class:palette.name'
-            desc_sty = 'class:palette.active' if active else 'class:palette.desc'
-            lines.append((sty, '  '))
-            lines.append((name_sty, name.ljust(12)))
-            lines.append((desc_sty, desc[:26]))
+            active = (i == self.palette_index % n)
+            # Claude Code style: active row is a full highlighted bar with a
+            # leading caret; command shown with a '/' prefix and accent colour.
+            marker = '> ' if active else '  '
+            if active:
+                lines.append(('class:palette.active', marker))
+                lines.append(('class:palette.active', '/' + name.ljust(11)))
+                lines.append(('class:palette.active', desc))
+            else:
+                lines.append(('class:palette', marker))
+                lines.append(('class:palette.name', '/' + name.ljust(11)))
+                lines.append(('class:palette.desc', desc))
             lines.append(('', '\n'))
         if lines and lines[-1][1].endswith('\n'):
             lines.pop()
@@ -560,10 +593,10 @@ class MalCliShell:
     # Dispatch
     # ------------------------------------------------------------
     def _dispatch(self, line: str):
-        line = line.strip()
+        line = line.strip().lstrip('/')
         if not line:
             return
-        self._append('class:user', '❯ ' + line)
+        self._append('class:user', '> ' + line)
         parts = line.split()
         cmd = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else ""
