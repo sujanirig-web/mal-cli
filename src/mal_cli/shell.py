@@ -9,6 +9,7 @@ A Claude-style full-screen terminal UI:
 
 import sys
 import json
+import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -28,9 +29,11 @@ from prompt_toolkit import Application
 from prompt_toolkit.application import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import HTML, to_formatted_text
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import (
     HSplit, VSplit, Window,
@@ -220,7 +223,21 @@ class MalCliShell:
 
         # Output pane lines (rendered as formatted text)
         self.output = []   # list of styled (style, text) tuples
-        self.output_frag = FormattedTextControl(text=[], show_cursor=False)
+        self.output_frag = FormattedTextControl(
+            text=[],
+            show_cursor=False,
+            get_cursor_position=self._output_cursor,
+        )
+
+        # Output pane scrolling (pager style, driven by the control cursor):
+        #   self._cursor_y = None  -> auto-follow the bottom of the output
+        #   self._cursor_y = int   -> content line shown at the top of the view
+        self._cursor_y = None
+        self._output_window = None
+
+        # Set by the /monitor command so the monitor runs after the TUI has
+        # fully exited (running it inside the key handler would freeze the app).
+        self._monitor_requested = False
 
         # History file
         history_file = CONFIG_DIR / "history"
@@ -274,7 +291,7 @@ class MalCliShell:
         )
 
         # --------------------------------------------------------
-        # Output pane (fills remaining middle space)
+        # Output pane (fills remaining middle space, scrollable)
         # --------------------------------------------------------
         output_window = Window(
             self.output_frag,
@@ -282,6 +299,7 @@ class MalCliShell:
             always_hide_cursor=True,
             height=Dimension(weight=1),
         )
+        self._output_window = output_window
 
         # Bottom toolbar (refresh state each render)
         def get_toolbar():
@@ -306,6 +324,8 @@ class MalCliShell:
                 ('class:toolbar', f'db: {self.db.db_path} '),
                 ('class:toolbar.sep', '│ '),
                 ('class:toolbar', f'{len(self.output)} lines'),
+                ('class:toolbar.sep', ' │ '),
+                ('class:toolbar', self._scroll_indicator()),
             ])
 
         # Input field with a "❯" prompt marker on a visible bar
@@ -430,6 +450,39 @@ class MalCliShell:
             else:
                 event.app.current_buffer.reset()
 
+        # --- Output pane scrolling -------------------------------------
+        @kb.add(Keys.ScrollUp)
+        def _(event):
+            self._scroll_output(-3)
+
+        @kb.add(Keys.ScrollDown)
+        def _(event):
+            self._scroll_output(3)
+
+        @kb.add('c-up')
+        def _(event):
+            self._scroll_output(-1)
+
+        @kb.add('c-down')
+        def _(event):
+            self._scroll_output(1)
+
+        @kb.add('pageup')
+        def _(event):
+            self._scroll_page(-1)
+
+        @kb.add('pagedown')
+        def _(event):
+            self._scroll_page(1)
+
+        @kb.add('c-end')
+        def _(event):
+            self._scroll_to_bottom()
+
+        @kb.add('c-home')
+        def _(event):
+            self._scroll_to_top()
+
         @kb.add('c-c')
         def _(event):
             if self.palette_open:
@@ -448,7 +501,7 @@ class MalCliShell:
             key_bindings=kb,
             style=self._style,
             full_screen=True,
-            mouse_support=False,
+            mouse_support=True,
             refresh_interval=0.2,
         )
 
@@ -478,16 +531,65 @@ class MalCliShell:
         if len(self.output) > 4000:
             self.output = self.output[-3000:]
         frags = []
-        # Render prompt glyph for user lines vs plain output.
+        # Each output entry is either a single (style, text) line or a list of
+        # (style, text) fragments that form ONE visual line (used by tables so
+        # cells keep their own colour but stay on the same row).
         # Unprefixed styles (e.g. "output.head") must become class refs so
         # prompt_toolkit resolves them against our Style dict instead of
         # treating them as inline color names.
-        for style, line in self.output:
-            frags.append((self._resolve_style(style), line))
+        for entry in self.output:
+            if isinstance(entry, list):
+                for style, text in entry:
+                    frags.append((self._resolve_style(style), text))
+            else:
+                style, text = entry
+                frags.append((self._resolve_style(style), text))
             frags.append(('', '\n'))
         if frags:
             frags.pop()  # remove trailing newline
         self.output_frag.text = frags
+
+    # ------------------------------------------------------------
+    # Output pane scrolling
+    # ------------------------------------------------------------
+    def _output_cursor(self):
+        """Cursor position that drives the output pane's pager-style scroll."""
+        if not self.output:
+            return None
+        if self._cursor_y is None:
+            # Follow the bottom: place the cursor on the last content line.
+            return Point(0, len(self.output) - 1)
+        return Point(0, min(self._cursor_y, len(self.output) - 1))
+
+    def _scroll_lines(self, delta: int):
+        if not self.output:
+            return
+        current_top = self._cursor_y
+        if current_top is None:
+            current_top = len(self.output) - 1
+        self._cursor_y = max(0, min(current_top + delta, len(self.output) - 1))
+        get_app().invalidate()
+
+    def _scroll_output(self, delta: int):
+        self._scroll_lines(delta)
+
+    def _scroll_page(self, direction: int):
+        info = self._output_window.render_info if self._output_window else None
+        height = (info.window_height if info and info.window_height else 20) - 1
+        self._scroll_lines(direction * max(1, height))
+
+    def _scroll_to_bottom(self):
+        self._cursor_y = None
+        get_app().invalidate()
+
+    def _scroll_to_top(self):
+        self._cursor_y = 0
+        get_app().invalidate()
+
+    def _scroll_indicator(self):
+        if self._cursor_y is None:
+            return 'scroll: ★ bottom  (PgUp/PgDn)'
+        return 'scroll: ↑ up  (PgUp/PgDn)'
 
     def _banner(self):
         self.output = []
@@ -634,6 +736,9 @@ class MalCliShell:
             self.do_report(arg)
         else:
             self._err(f"Unknown command: {cmd}. Type help.")
+        # Always snap back to the newest output so a freshly run command's
+        # output is never hidden below the fold.
+        self._scroll_to_bottom()
 
     # ------------------------------------------------------------
     # Lazy device initialisation
@@ -668,7 +773,7 @@ class MalCliShell:
     def _refresh_package_names(self):
         if self.scanner:
             try:
-                pkgs = self.scanner.get_all_packages()
+                pkgs = self.scanner.list_packages_light()
                 self.package_names = [p.name for p in pkgs]
                 self.completer = MalCliCompleter(self.commands, self.package_names)
                 self.buffer.completer = self.completer
@@ -682,7 +787,7 @@ class MalCliShell:
     # ------------------------------------------------------------
     # Command implementations
     # ------------------------------------------------------------
-    def _render_table(self, headers, rows, colorize_risk=False):
+    def _render_table(self, headers, rows, colorize_risk=False, risk_col=2):
         col_widths = [len(h) for h in headers]
         for row in rows:
             for i, cell in enumerate(row):
@@ -690,14 +795,14 @@ class MalCliShell:
                     col_widths[i] = max(col_widths[i], len(str(cell)))
         self._append('output', "  ┌─" + "─┬─".join("─" * w for w in col_widths) + "─┐")
         header_line = "  │ " + " │ ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers)) + " │"
-        self._head(header_line)
+        self._append('output.head', header_line)
         self._append('output', "  ├─" + "─┼─".join("─" * w for w in col_widths) + "─┤")
         for row in rows:
             cells = []
             for i, cell in enumerate(row):
                 text = str(cell)
                 style = 'output'
-                if colorize_risk and i == 2:
+                if colorize_risk and i == risk_col:
                     if "CRITICAL" in text:
                         style = 'output.err'
                     elif "HIGH" in text:
@@ -707,9 +812,13 @@ class MalCliShell:
                     else:
                         style = 'output.ok'
                 cells.append((style, text.ljust(col_widths[i])))
-            self.output.append(('output', "  │ "))
-            self.output.extend(cells)
-            self.output.append(('output', " │"))
+            row_frags = [('output', "  │ ")]
+            for i, (style, celltext) in enumerate(cells):
+                if i > 0:
+                    row_frags.append(('output', ' │ '))
+                row_frags.append((style, celltext))
+            row_frags.append(('output', ' │'))
+            self.output.append(row_frags)
             self._refresh_output()
         self._append('output', "  └─" + "─┴─".join("─" * w for w in col_widths) + "─┘")
 
@@ -728,7 +837,7 @@ class MalCliShell:
         if not self._ensure_device():
             return
         self._info("Fetching installed packages...")
-        packages = self.scanner.get_all_packages()
+        packages = self.scanner.list_packages_light()
         rows = []
         for pkg in packages:
             risk = self.db.get_latest_risk(pkg.name)
@@ -753,37 +862,51 @@ class MalCliShell:
             return
         if not self._ensure_device():
             return
-        pkg = self.scanner.get_package_info(package)
+        try:
+            pkg = self.scanner.get_package_info(package)
+        except Exception as e:
+            self._err(f"Could not read info for '{package}': {e}")
+            return
         if not pkg:
             self._err(f"Package '{package}' not found")
             return
         self._head(f" Package: {pkg.name}")
-        self._print(f"  Version     : {pkg.version}")
+        self._print(f"  Version     : {pkg.version or 'unknown'}")
         self._print(f"  Installer   : {pkg.installer or 'unknown'}")
-        self._print(f"  Target SDK  : {pkg.target_sdk}")
-        self._print(f"  Min SDK     : {pkg.min_sdk}")
+        self._print(f"  Target SDK  : {pkg.target_sdk or '?'}")
+        self._print(f"  Min SDK     : {pkg.min_sdk or '?'}")
         self._print(f"  APK Hash    : {pkg.apk_hash or 'not computed'}")
         self._print(f"  Signer      : {pkg.signer_info or 'unknown'}")
+        risk = self.db.get_latest_risk(pkg.name)
+        if risk:
+            self._print(f"  Risk        : {risk['level']} ({risk['score']})")
+        else:
+            self._print("  Risk        : not scanned yet")
         self._info("  Permissions:")
-        perms = self.db.get_permissions(pkg.name) or pkg.permissions or []
-        if perms:
-            for perm in perms:
+        if pkg.permissions:
+            for perm in pkg.permissions:
                 self._print(f"    {perm}")
         else:
             self._print("    (none)")
         self._info("  Services:")
-        services = self.db.get_services(pkg.name) or pkg.services or []
-        if services:
-            for svc in services:
+        if pkg.services:
+            for svc in pkg.services:
                 self._print(f"    {svc}")
         else:
             self._print("    (none)")
         self._info("  Risk History:")
         history = self.db.get_risk_history(pkg.name, limit=10)
         if history:
+            rows = []
+            for h in history:
+                ts = h["timestamp"]
+                if isinstance(ts, (int, float)):
+                    ts = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                rows.append((str(ts), h["score"], h["level"]))
             self._render_table(
                 ["Timestamp", "Score", "Level"],
-                [(h["timestamp"], h["score"], h["level"]) for h in history]
+                rows,
+                colorize_risk=True,
             )
         else:
             self._print("    No history")
@@ -799,32 +922,36 @@ class MalCliShell:
             pkgs = [pkg]
         else:
             self._info("Scanning all packages...")
-            pkgs = self.scanner.get_all_packages()
+            pkgs = self.scanner.list_packages_light()
+        rows = []
+        flagged = 0
         for pkg in pkgs:
             risk = self.analyzer.evaluate_package(pkg)
-            self.db.save_risk(pkg.name, risk.score, risk.level, risk.explanation)
-            line = f"  {pkg.name}: {risk.level} ({risk.score}) - {risk.explanation}"
-            if "CRITICAL" in risk.level or "HIGH" in risk.level:
-                self._warn(line)
-            elif "MEDIUM" in risk.level:
-                self._info(line)
-            else:
-                self._ok(line)
-        self._ok("Scan complete.")
+            level = getattr(risk.level, "value", risk.level)
+            self.db.save_risk(pkg.name, risk.score, level, risk.explanation)
+            target = str(pkg.target_sdk) if pkg.target_sdk else "?"
+            rows.append((pkg.name, level, str(risk.score), target, risk.explanation or ""))
+            if level in ("CRITICAL", "HIGH"):
+                flagged += 1
+        if rows:
+            self._render_table(
+                ["Package", "Risk", "Score", "Target SDK", "Detail"],
+                rows,
+                colorize_risk=True,
+                risk_col=1,
+            )
+        if flagged:
+            self._warn(f"Scan complete: {flagged} package(s) flagged HIGH/CRITICAL.")
+        else:
+            self._ok(f"Scan complete: {len(rows)} package(s) scanned, none flagged.")
         self._refresh_package_names()
 
     def do_monitor(self):
         if not self._ensure_device():
             return
-        self._info("Starting live monitor (press Ctrl+C to return to shell)...")
+        self._monitor_requested = True
+        self._info("Exiting TUI to start monitor (Ctrl+C returns to shell)...")
         self.app.exit()
-        monitor = Monitor(self.client, self.device, self.db, self.analyzer, interval=2.0)
-        try:
-            monitor.start()
-        except KeyboardInterrupt:
-            monitor.stop()
-            self._print("Monitoring stopped.")
-        self._run_shell()
 
     def do_events(self, limit_str):
         limit = int(limit_str) if limit_str and limit_str.isdigit() else 20
@@ -973,10 +1100,26 @@ class MalCliShell:
         self._run_shell()
 
     def _run_shell(self):
+        """Run the TUI loop. A /monitor request restarts the loop after the
+        blocking console monitor has finished."""
+        while True:
+            self._monitor_requested = False
+            try:
+                self.app.run()
+            except KeyboardInterrupt:
+                pass
+            if not self._monitor_requested:
+                break
+            self._run_monitor_console()
+
+    def _run_monitor_console(self):
+        """Run the blocking text-mode monitor after the TUI has fully exited."""
+        monitor = Monitor(self.client, self.device, self.db, self.analyzer, interval=2.0)
         try:
-            self.app.run()
+            monitor.start()
         except KeyboardInterrupt:
             pass
+        monitor.stop()
 
 
 def main():

@@ -8,6 +8,16 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 import os
 
+from mal_cli.analyzer.risk import RiskLevel
+
+
+def _lvl(level):
+    """Normalise a risk level (may be a RiskLevel enum or plain string)
+    into the plain string that is stored in the database."""
+    if isinstance(level, RiskLevel):
+        return level.value
+    return level
+
 
 class Database:
     def __init__(self, db_path: str = None):
@@ -84,7 +94,7 @@ class Database:
             cur.execute("""
                 INSERT INTO risk_history (package_name, timestamp, score, level)
                 VALUES (?, ?, ?, ?)
-            """, (package, int(datetime.now().timestamp()), score, level))
+            """, (package, int(datetime.now().timestamp()), score, _lvl(level)))
             conn.commit()
             # Update last_seen in packages
             cur.execute("UPDATE packages SET last_seen = ? WHERE name = ?",

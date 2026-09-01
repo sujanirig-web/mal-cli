@@ -2,6 +2,7 @@
 Higher-level ADB commands.
 """
 
+import re
 from typing import List, Dict, Optional, Tuple
 from mal_cli.adb.client import ADBClient
 
@@ -23,6 +24,7 @@ class ADBCommands:
             "installer": "",
             "target_sdk": 0,
             "min_sdk": 0,
+            "found": "Unable to find package" not in out,
         }
         lines = out.splitlines()
         for i, line in enumerate(lines):
@@ -39,46 +41,61 @@ class ADBCommands:
     def list_packages(self) -> List[str]:
         return self.client.pm_list_packages(self.serial)
 
+    _SECTION = re.compile(r"^[ ]{4}[A-Za-z][A-Za-z0-9 ]*:$")
+
     def get_permissions(self, package: str) -> List[str]:
         """Extract requested permissions from dumpsys package."""
         out = self.client.dumpsys("package", package, self.serial)
         perms = []
-        in_perms = False
+        in_section = False
         for line in out.splitlines():
             if "requested permissions:" in line:
-                in_perms = True
+                in_section = True
                 continue
-            if in_perms and line.strip():
-                if line.startswith("  "):
-                    perm = line.strip()
-                    if perm and not perm.startswith("android.permission."):
-                        # Sometimes includes full names
-                        pass
-                    perms.append(perm)
-                else:
-                    in_perms = False
-        return perms
+            if not in_section:
+                continue
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if not line.startswith("  "):
+                in_section = False
+                continue
+            # A new top-level dumpsys section ends the requested-permissions block
+            if self._SECTION.match(line):
+                in_section = False
+                continue
+            # Only accept plain permission tokens (e.g. android.permission.CAMERA)
+            if re.fullmatch(r"[A-Za-z0-9_.]+", stripped):
+                perms.append(stripped)
+            else:
+                # Unclassifiable indented content means we left the section
+                in_section = False
+        return list(dict.fromkeys(perms))
 
     def get_services(self, package: str) -> List[str]:
-        """Extract service names from dumpsys package."""
+        """Extract service component names from dumpsys package."""
         out = self.client.dumpsys("package", package, self.serial)
         services = []
-        in_services = False
+        in_section = False
+        pref = package + "/"
         for line in out.splitlines():
-            if "Service:" in line:
-                in_services = True
+            if "Service Resolver Table:" in line:
+                in_section = True
                 continue
-            if in_services and line.strip():
-                if line.startswith("  "):
-                    # Extract service name
-                    parts = line.strip().split()
-                    if parts:
-                        svc = parts[0]
-                        if svc.startswith(package):
-                            services.append(svc)
-                else:
-                    in_services = False
-        return services
+            if not in_section:
+                continue
+            if not line.startswith("  "):
+                in_section = False
+                continue
+            # A new top-level dumpsys section ends the service resolver table
+            if self._SECTION.match(line):
+                in_section = False
+                continue
+            for tok in line.split():
+                if tok.startswith(pref):
+                    services.append(tok)
+                    break
+        return list(dict.fromkeys(services))
 
     def get_running_processes(self) -> List[Dict]:
         """Return list of running processes with package mapping."""

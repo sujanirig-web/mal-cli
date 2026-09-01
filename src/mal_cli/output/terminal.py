@@ -55,7 +55,7 @@ class Terminal:
         print(f"{Fore.GREEN}{text}{Style.RESET_ALL}")
 
     @staticmethod
-    def print_table(headers: List[str], rows: List[Tuple], colorize_risk: bool = False):
+    def print_table(headers: List[str], rows: List[Tuple], colorize_risk: bool = False, risk_col: int = 2):
         # Compute column widths
         col_widths = [len(h) for h in headers]
         for row in rows:
@@ -73,7 +73,7 @@ class Terminal:
             cells = []
             for i, cell in enumerate(row):
                 text = str(cell)
-                if colorize_risk and i == 2:  # Risk level column
+                if colorize_risk and i == risk_col:  # Risk level column
                     if "CRITICAL" in text:
                         text = f"{Fore.RED}{text}{Style.RESET_ALL}"
                     elif "HIGH" in text:

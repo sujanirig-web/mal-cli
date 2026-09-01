@@ -155,17 +155,18 @@ def main(argv: Optional[list] = None) -> None:
 
     if args.command == "apps":
         scanner = PackageScanner(client, device)
-        packages = scanner.get_all_packages()
+        packages = scanner.list_packages_light()
         rows = []
         for pkg in packages:
             risk = db.get_latest_risk(pkg.name)
             level = risk["level"] if risk else "UNKNOWN"
             score = risk["score"] if risk else "?"
-            rows.append((pkg.name, pkg.version, level, score))
+            target = str(pkg.target_sdk) if pkg.target_sdk else "?"
+            rows.append((pkg.name, pkg.version, level, score, target))
         terminal.print_table(
-            ["Package", "Version", "Risk Level", "Score"],
+            ["Package", "Version", "Risk Level", "Score", "Target SDK"],
             rows,
-            colorize_risk=True
+            colorize_risk=True,
         )
         return
 
@@ -217,17 +218,20 @@ def main(argv: Optional[list] = None) -> None:
                 sys.exit(1)
             packages = [pkg]
         else:
-            packages = scanner.get_all_packages()
+            packages = scanner.list_packages_light()
         results = []
         for pkg in packages:
             risk = analyzer.evaluate_package(pkg)
-            db.save_risk(pkg.name, risk.score, risk.level, risk.explanation)
-            results.append((pkg.name, risk.level, risk.score, risk.explanation))
+            level = getattr(risk.level, "value", risk.level)
+            db.save_risk(pkg.name, risk.score, level, risk.explanation)
+            target = str(pkg.target_sdk) if pkg.target_sdk else "?"
+            results.append((pkg.name, level, risk.score, target, risk.explanation))
         terminal.print_header("Scan Results")
         terminal.print_table(
-            ["Package", "Risk Level", "Score", "Explanation"],
+            ["Package", "Risk Level", "Score", "Target SDK", "Explanation"],
             results,
-            colorize_risk=True
+            colorize_risk=True,
+            risk_col=1,
         )
         return
 

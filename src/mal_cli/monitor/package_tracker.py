@@ -26,7 +26,7 @@ class PackageTracker:
         })
         state["last_seen"] = time.time()
         if risk:
-            state["risk_history"].append((time.time(), risk.score, risk.level))
+            state["risk_history"].append((time.time(), risk.score, getattr(risk.level, "value", risk.level)))
             # Trim history
             if len(state["risk_history"]) > 100:
                 state["risk_history"] = state["risk_history"][-100:]

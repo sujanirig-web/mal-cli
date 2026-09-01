@@ -14,9 +14,11 @@ class ForegroundMonitor:
         self.tracker = tracker
         self.events = event_queue
         self.last_foreground = None
+        self.foreground = None
 
     def update(self):
         fg = self.cmds.get_foreground_activity()
+        self.foreground = fg
         if fg != self.last_foreground:
             if fg:
                 self.events.put({
