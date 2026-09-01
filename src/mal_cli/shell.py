@@ -1,4 +1,4 @@
-﻿"""
+"""
 Interactive shell for mal-cli.
 
 A Claude-style full-screen terminal UI:
@@ -37,13 +37,14 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import (
     HSplit, VSplit, Window,
-    WindowAlign,
+    WindowAlign, FloatContainer, Float,
 )
 from prompt_toolkit.layout import ConditionalContainer
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.layout.controls import FormattedTextControl, BufferControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.styles import Style
+from prompt_toolkit.utils import get_cwidth
 
 from mal_cli import __version__
 from mal_cli.adb.client import ADBClient
@@ -291,17 +292,8 @@ class MalCliShell:
         )
 
         # --------------------------------------------------------
-        # Output pane (fills remaining middle space, scrollable)
-        # --------------------------------------------------------
-        output_window = Window(
-            self.output_frag,
-            wrap_lines=True,
-            always_hide_cursor=True,
-            height=Dimension(weight=1),
-        )
-        self._output_window = output_window
-
         # Bottom toolbar (refresh state each render)
+        # --------------------------------------------------------
         def get_toolbar():
             if self.device and self.device.is_online:
                 dev_info = f"{self.device.serial} ({self.device.model})"
@@ -334,7 +326,7 @@ class MalCliShell:
             height=1,
             wrap_lines=False,
             always_hide_cursor=False,
-            width=Dimension(max=78),
+            width=Dimension.exact(62),
             style='class:inputbar',
         )
         prompt_marker = Window(
@@ -370,44 +362,98 @@ class MalCliShell:
         )
 
         # --------------------------------------------------------
-        # Centered command input, pushed a little below centre
+        # Slash palette renders just below the header, centred.
         # --------------------------------------------------------
-        centered_input = HSplit([
-            Window(char=" ", width=Dimension(weight=1)),
-            input_row,
-            Window(char=" ", width=Dimension(weight=1)),
-        ])
+        def hcenter(content):
+            return VSplit([
+                Window(width=Dimension(weight=1)),
+                content,
+                Window(width=Dimension(weight=1)),
+            ])
 
-        # output pane fills the whole middle region (hidden when empty)
-        output_pane = ConditionalContainer(
-            output_window,
-            filter=Condition(lambda: bool(self.output)),
-        )
-
-        # Slash-command palette pops up directly above the input bar.
         palette_popup = ConditionalContainer(
-            palette_window,
+            hcenter(palette_window),
             filter=Condition(self._palette_is_open),
         )
 
+        # --------------------------------------------------------
+        # The input bar alone floats centred in the middle of the
+        # screen, over the output pane (opencode-style).
+        #
+        # IMPORTANT: a Float is sized by its content's *preferred*
+        # width when no explicit width is given. Weighted spacer
+        # columns then collapse to ~0 and the input bar gets almost
+        # no width, which hides typed text. Give the float an
+        # explicit, terminal-aware width instead.
+        # --------------------------------------------------------
+        def _input_float_width():
+            try:
+                cols = get_app().output.get_size().columns
+            except Exception:
+                cols = 80
+            return max(50, min(80, cols - 16))
+
+        def _input_float_height():
+            try:
+                return get_app().output.get_size().rows
+            except Exception:
+                return 24
+
+        # Height weights (5 : 1) push the input bar lower again
+        # (centre ≈ 79%: 5.5/7 units). Weights are transparent empty
+        # windows so the output pane stays visible underneath the
+        # full-height float.
+        centered_input = HSplit([
+            Window(height=Dimension(weight=5)),
+            hcenter(input_row),
+            Window(height=Dimension(weight=1)),
+        ])
+
+        # --------------------------------------------------------
+        # Output pane (always occupies the middle so the status
+        # toolbar below it stays pinned to the bottom of the screen,
+        # even while the output is empty).
+        # --------------------------------------------------------
+        output_pane = Window(
+            self.output_frag,
+            wrap_lines=True,
+            always_hide_cursor=True,
+            height=Dimension(weight=19),
+        )
+        self._output_window = output_pane
+
+        # --------------------------------------------------------
         # Brand can be hidden/kept via ui_config.json
+        # --------------------------------------------------------
         brand_container = ConditionalContainer(
             brand_window,
             filter=Condition(lambda: self.ui["show_brand"]),
         )
 
-        # Claude Code-style layout: compact brand at top, output fills the
-        # middle, and the slash palette + input bar pinned to the bottom above
-        # a thin toolbar.
-        container = HSplit([
+        # --------------------------------------------------------
+        # Layout: brand header pushed ~5% below the top edge (margin
+        # weight 1 vs output weight 19), output fills the screen, the
+        # palette + input float centred over it, toolbar on bottom.
+        # --------------------------------------------------------
+        background = HSplit([
+            Window(height=Dimension(weight=1)),
             brand_container,
             output_pane,
-            Window(char=" ", height=Dimension(weight=1)),
-            palette_popup,
-            centered_input,
-            Window(char=" ", height=1),
-            toolbar_window,
         ])
+
+        # Pin the status toolbar to the true bottom of the screen, outside the
+        # floating input block, so it is never covered or displaced by the
+        # centred interactive overlay.
+        container = FloatContainer(
+            content=HSplit([
+                background,
+                toolbar_window,
+            ]),
+            floats=[
+            Float(centered_input, width=_input_float_width, height=_input_float_height, transparent=True),
+            Float(palette_popup, width=46),
+        ],
+        )
 
         root = container
 
@@ -539,11 +585,20 @@ class MalCliShell:
         # treating them as inline color names.
         for entry in self.output:
             if isinstance(entry, list):
-                for style, text in entry:
-                    frags.append((self._resolve_style(style), text))
+                parts = [(self._resolve_style(style), text) for style, text in entry]
             else:
                 style, text = entry
-                frags.append((self._resolve_style(style), text))
+                parts = [(self._resolve_style(style), text)]
+            # Centre short lines against the terminal width so command
+            # results sit in the middle like the palette and input bar.
+            width = sum(int(get_cwidth(text)) for _, text in parts)
+            try:
+                cols = get_app().output.get_size().columns
+            except Exception:
+                cols = 80
+            if 0 < width < cols - 4:
+                frags.append(('', ' ' * ((cols - width) // 2)))
+            frags.extend(parts)
             frags.append(('', '\n'))
         if frags:
             frags.pop()  # remove trailing newline
@@ -665,6 +720,9 @@ class MalCliShell:
             ]
         self.palette_index = max(0, min(self.palette_index,
                                         max(0, len(self.filtered_palette) - 1)))
+        # Let the palette hug its filtered contents (avoids a tall empty
+        # box when only a few commands match).
+        self._palette_window.height = Dimension.exact(max(1, len(self.filtered_palette)))
 
     def _get_palette_text(self):
         if not self.palette_open:
@@ -787,20 +845,94 @@ class MalCliShell:
     # ------------------------------------------------------------
     # Command implementations
     # ------------------------------------------------------------
+    def _render_scan(self, rows):
+        """Boxed /scan table (Package | Risk | Score | Target SDK | Detail).
+        Width is capped on the terminal so the box never wraps or collides
+        with the centred palette/input; long cells are truncated with an
+        ellipsis. The output pane scrolls (PgUp/PgDn) to reach every row."""
+        headers = ["Package", "Risk", "Score", "Target SDK", "Detail"]
+        col_widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                if i < len(col_widths):
+                    col_widths[i] = max(col_widths[i], len(str(cell)))
+
+        try:
+            cols = get_app().output.get_size().columns
+        except Exception:
+            cols = 80
+        # Fit the box to the full output region (between the brand header at
+        # top and the input bar at bottom): fill nearly all the terminal
+        # width so the table spans the pane instead of a small centred box.
+        max_width = max(40, cols - 6)
+        total = sum(col_widths) + 3 * len(col_widths) + 2
+        if total > max_width and col_widths:
+            excess = total - max_width
+            col_widths[-1] = max(4, col_widths[-1] - excess)
+
+        def cell_text(text, i):
+            s = str(text)
+            w = col_widths[i]
+            return s[:w - 1] + "…" if len(s) > w else s
+
+        self._append('output', "  ┌─" + "─┬─".join("─" * w for w in col_widths) + "─┐")
+        header_line = "  │ " + " │ ".join(cell_text(h, i).ljust(col_widths[i]) for i, h in enumerate(headers)) + " │"
+        self._append('output.head', header_line)
+        self._append('output', "  ├─" + "─┼─".join("─" * w for w in col_widths) + "─┤")
+        for row in rows:
+            cells = []
+            for i, cell in enumerate(row):
+                text = cell_text(cell, i)
+                style = 'output'
+                if i == 1:
+                    if "CRITICAL" in text:
+                        style = 'output.err'
+                    elif "HIGH" in text:
+                        style = 'output.warn'
+                    elif "MEDIUM" in text:
+                        style = 'output.info'
+                    else:
+                        style = 'output.ok'
+                cells.append((style, text.ljust(col_widths[i])))
+            row_frags = [('output', "  │ ")]
+            for i, (style, celltext) in enumerate(cells):
+                if i > 0:
+                    row_frags.append(('output', ' │ '))
+                row_frags.append((style, celltext))
+            row_frags.append(('output', ' │'))
+            self.output.append(row_frags)
+            self._refresh_output()
+        self._append('output', "  └─" + "─┴─".join("─" * w for w in col_widths) + "─┘")
+
     def _render_table(self, headers, rows, colorize_risk=False, risk_col=2):
         col_widths = [len(h) for h in headers]
         for row in rows:
             for i, cell in enumerate(row):
                 if i < len(col_widths):
                     col_widths[i] = max(col_widths[i], len(str(cell)))
+
+        # Cap the whole table to a fixed width so it stays compact and never
+        # wraps (a wrapped box collides with the centred palette/input).
+        # The trailing column absorbs the overflow and gets an ellipsis.
+        max_width = 66
+        total = sum(col_widths) + 3 * len(col_widths) + 2
+        if total > max_width and col_widths:
+            excess = total - max_width
+            col_widths[-1] = max(4, col_widths[-1] - excess)
+
+        def cell_text(text, i):
+            s = str(text)
+            w = col_widths[i]
+            return s[:w - 1] + "…" if len(s) > w else s
+
         self._append('output', "  ┌─" + "─┬─".join("─" * w for w in col_widths) + "─┐")
-        header_line = "  │ " + " │ ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers)) + " │"
+        header_line = "  │ " + " │ ".join(cell_text(h, i).ljust(col_widths[i]) for i, h in enumerate(headers)) + " │"
         self._append('output.head', header_line)
         self._append('output', "  ├─" + "─┼─".join("─" * w for w in col_widths) + "─┤")
         for row in rows:
             cells = []
             for i, cell in enumerate(row):
-                text = str(cell)
+                text = cell_text(cell, i)
                 style = 'output'
                 if colorize_risk and i == risk_col:
                     if "CRITICAL" in text:
@@ -934,12 +1066,7 @@ class MalCliShell:
             if level in ("CRITICAL", "HIGH"):
                 flagged += 1
         if rows:
-            self._render_table(
-                ["Package", "Risk", "Score", "Target SDK", "Detail"],
-                rows,
-                colorize_risk=True,
-                risk_col=1,
-            )
+            self._render_scan(rows)
         if flagged:
             self._warn(f"Scan complete: {flagged} package(s) flagged HIGH/CRITICAL.")
         else:
