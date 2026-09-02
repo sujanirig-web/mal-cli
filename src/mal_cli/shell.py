@@ -845,11 +845,13 @@ class MalCliShell:
     # ------------------------------------------------------------
     # Command implementations
     # ------------------------------------------------------------
-    def _render_scan(self, rows):
+    def _render_scan(self, rows, max_rows: int = 12):
         """Boxed /scan table (Package | Risk | Score | Target SDK | Detail).
         Width is capped on the terminal so the box never wraps or collides
         with the centred palette/input; long cells are truncated with an
-        ellipsis. The output pane scrolls (PgUp/PgDn) to reach every row."""
+        ellipsis. The output pane scrolls (PgUp/PgDn) to reach every row.
+        Shows up to max_rows packages in the box; all rows remain accessible
+        via output pane scrolling."""
         headers = ["Package", "Risk", "Score", "Target SDK", "Detail"]
         col_widths = [len(h) for h in headers]
         for row in rows:
@@ -862,9 +864,9 @@ class MalCliShell:
         except Exception:
             cols = 80
         # Fit the box to the full output region (between the brand header at
-        # top and the input bar at bottom): fill nearly all the terminal
-        # width so the table spans the pane instead of a small centred box.
-        max_width = max(40, cols - 6)
+        # top and the input bar at bottom). Use cols - 22 to reserve space
+        # for the centred input bar (62 cols + 2 prompt marker + margins).
+        max_width = max(40, cols - 22)
         total = sum(col_widths) + 3 * len(col_widths) + 2
         if total > max_width and col_widths:
             excess = total - max_width
@@ -879,7 +881,8 @@ class MalCliShell:
         header_line = "  │ " + " │ ".join(cell_text(h, i).ljust(col_widths[i]) for i, h in enumerate(headers)) + " │"
         self._append('output.head', header_line)
         self._append('output', "  ├─" + "─┼─".join("─" * w for w in col_widths) + "─┤")
-        for row in rows:
+        displayed = rows[:max_rows]
+        for row in displayed:
             cells = []
             for i, cell in enumerate(row):
                 text = cell_text(cell, i)
@@ -1066,7 +1069,7 @@ class MalCliShell:
             if level in ("CRITICAL", "HIGH"):
                 flagged += 1
         if rows:
-            self._render_scan(rows)
+            self._render_scan(rows, max_rows=12)
         if flagged:
             self._warn(f"Scan complete: {flagged} package(s) flagged HIGH/CRITICAL.")
         else:
